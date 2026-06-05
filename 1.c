@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stddef.h>
 #include <math.h>
 
 #define MAX_LINE 8192
@@ -60,7 +61,7 @@ static int parse_csv_line(const char *line, char **fields, int max_fields) {
         char c = line[i];
         if (in_quotes) {
             if (c == '"') {
-                if (line[i+1] == '"') {
+                if (line[i + 1] == '"') {
                     buf[b++] = '"';
                     i++;
                 } else {
@@ -210,10 +211,6 @@ static int rows_are_duplicate(const Row *a, const Row *b) {
     return 1;
 }
 
-static double safe_square(double x) {
-    return x * x;
-}
-
 static void shuffle_indices(int *indices, int n) {
     for (int i = n - 1; i > 0; --i) {
         int j = rand() % (i + 1);
@@ -250,11 +247,11 @@ static void build_feature_matrix(double *X, const double *years, int n, double m
                                  int country_idx[], int country_count,
                                  int industry_idx[], int industry_count,
                                  int total_features) {
-    int offset = 1;
     for (int i = 0; i < n; ++i) {
         double *row = X + ((ptrdiff_t)i * total_features);
         for (int j = 0; j < total_features; ++j) row[j] = 0.0;
         row[0] = (years[i] - mean) / std;
+        int offset = 1;
         if (exp_idx[i] >= 0) row[offset + exp_idx[i]] = 1.0;
         offset += exp_count;
         if (edu_idx[i] >= 0) row[offset + edu_idx[i]] = 1.0;
@@ -268,8 +265,6 @@ static void build_feature_matrix(double *X, const double *years, int n, double m
         if (country_idx[i] >= 0) row[offset + country_idx[i]] = 1.0;
         offset += country_count;
         if (industry_idx[i] >= 0) row[offset + industry_idx[i]] = 1.0;
-        offset += industry_count;
-        offset = 1;
     }
 }
 
@@ -422,8 +417,7 @@ static void predict_custom_example(const double *weights, int dim,
     print_categories("industry", industry_cats, industry_count);
     int industry_choice = ask_for_index("选择 industry", industry_count - 1);
 
-    int total_features = 1 + exp_count + edu_count + job_count + remote_count + company_count + country_count + industry_count;
-    double *xrow = calloc(total_features, sizeof(double));
+    double *xrow = calloc((size_t)dim, sizeof(double));
     if (!xrow) return;
     xrow[0] = (years - year_mean) / year_std;
     int offset = 1;
@@ -441,7 +435,7 @@ static void predict_custom_example(const double *weights, int dim,
     offset += country_count;
     if (industry_choice >= 0) xrow[offset + industry_choice] = 1.0;
 
-    double prediction = predict_one(xrow, total_features, weights);
+    double prediction = predict_one(xrow, dim, weights);
     printf("\n预测年薪 annual_salary_usd = %.2f USD\n", prediction);
     free(xrow);
 }
@@ -682,7 +676,7 @@ int main(void) {
     ridge_train(X_train, y_train, train_size, total_features, weights, 2000, 0.01, 0.1);
 
     double train_mae, train_rmse, train_r2;
-    evaluate_model(X, y_train, train_idx, train_size, total_features, weights, &train_mae, &train_rmse, &train_r2);
+    evaluate_model(X, salary, train_idx, train_size, total_features, weights, &train_mae, &train_rmse, &train_r2);
     double test_mae, test_rmse, test_r2;
     evaluate_model(X, salary, test_idx, test_size, total_features, weights, &test_mae, &test_rmse, &test_r2);
 
