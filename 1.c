@@ -5,20 +5,28 @@
 #include <stddef.h>
 #include <math.h>
 
+// 最大文本行长度，用于读取 CSV 行
 #define MAX_LINE 8192
+// CSV 最多字段数，用于拆分行
 #define MAX_FIELDS 64
+// 支持的最大样本数
 #define MAX_ROWS 10000
+// 支持的最大类别数量，用于统计 one-hot 特征
 #define MAX_CAT_VALUES 512
+// 允许的最大总特征数（包括数值特征和所有 one-hot 特征）
 #define MAX_FEATURES 1024
+// 低频类别阈值，小于该数量的类别会被归并为 "Other"
 #define RARE_CATEGORY_THRESHOLD 2
 
+// 用于保存单个分类值的统计信息
 typedef struct {
-    char *value;
-    int count;
-    int keep;
-    int mapped_index;
+    char *value;        // 类别名称，例如 "USA" 或 "Senior (6-9 yrs)"
+    int count;          // 该类别在训练集中出现的次数
+    int keep;           // 是否保留该类别（低频类别会被归并为 Other）
+    int mapped_index;   // one-hot 编码后对应的特征索引
 } Category;
 
+// 保存一条数据记录的结构
 typedef struct {
     double years_of_experience;
     double annual_salary_usd;
@@ -31,6 +39,7 @@ typedef struct {
     char *industry;
 } Row;
 
+// 复制字符串，类似于 strdup，但更兼容标准 C
 static char *strdup_c(const char *text) {
     if (!text) return NULL;
     size_t len = strlen(text);
@@ -40,6 +49,7 @@ static char *strdup_c(const char *text) {
     return copy;
 }
 
+// 去掉字符串前后空白字符，并返回处理后的指针
 static char *trim(char *s) {
     if (!s) return s;
     char *start = s;
@@ -51,6 +61,8 @@ static char *trim(char *s) {
     return s;
 }
 
+// 解析一行 CSV 内容，将每个字段拆分到 fields 数组中。
+// 支持双引号包含的字段和字段内的双引号转义。
 static int parse_csv_line(const char *line, char **fields, int max_fields) {
     int field = 0;
     int in_quotes = 0;
@@ -92,6 +104,7 @@ static int parse_csv_line(const char *line, char **fields, int max_fields) {
     return field;
 }
 
+// 判断字符串是否为空值，例如空字符串、空格、NA、N/A、null
 static int is_missing_value(const char *s) {
     if (!s) return 1;
     while (*s && isspace((unsigned char)*s)) s++;
@@ -100,6 +113,7 @@ static int is_missing_value(const char *s) {
     return 0;
 }
 
+// 在类别数组中查找给定分类值的索引
 static int category_lookup(Category *cats, int count, const char *value) {
     for (int i = 0; i < count; ++i) {
         if (strcmp(cats[i].value, value) == 0) return i;
@@ -107,6 +121,7 @@ static int category_lookup(Category *cats, int count, const char *value) {
     return -1;
 }
 
+// 将给定分类值插入到类别数组中，或如果已存在则增加计数
 static int category_add(Category *cats, int *count, const char *value) {
     int idx = category_lookup(cats, *count, value);
     if (idx >= 0) {
@@ -121,6 +136,7 @@ static int category_add(Category *cats, int *count, const char *value) {
     return (*count)++;
 }
 
+// 在类别数组中查找 "Other" 类别的索引（如果存在）
 static int find_other_index(Category *cats, int count) {
     for (int i = 0; i < count; ++i) {
         if (strcmp(cats[i].value, "Other") == 0) return i;
@@ -128,6 +144,8 @@ static int find_other_index(Category *cats, int count) {
     return -1;
 }
 
+// 根据类别频率决定是否保留类别，并为保留类别分配 one-hot 索引。
+// 低于 min_count 的类别会被标记为不保留，并在后续映射到 "Other"。
 static void build_category_mapping(Category *cats, int *count, int min_count) {
     int other_index = find_other_index(cats, *count);
     int rare_found = 0;
@@ -160,6 +178,7 @@ static void build_category_mapping(Category *cats, int *count, int min_count) {
     }
 }
 
+// 将分类值映射到 one-hot 特征索引，如果该类别被归并为 Other，则返回 Other 的索引。
 static int map_category_value(Category *cats, int count, const char *value) {
     int idx = category_lookup(cats, count, value);
     if (idx >= 0 && cats[idx].keep) {
@@ -171,6 +190,7 @@ static int map_category_value(Category *cats, int count, const char *value) {
     return -1;
 }
 
+// 释放存储在行结构中的动态字符串内存
 static void free_rows(Row *rows, int row_count) {
     for (int i = 0; i < row_count; ++i) {
         free(rows[i].experience_level);
@@ -183,12 +203,14 @@ static void free_rows(Row *rows, int row_count) {
     }
 }
 
+// 释放类别数组中保存的字符串
 static void free_categories(Category *cats, int count) {
     for (int i = 0; i < count; ++i) {
         free(cats[i].value);
     }
 }
 
+// 安全地将字符串转换为 double，错误输入返回 0
 static int safe_parse_double(const char *text, double *out) {
     if (is_missing_value(text)) return 0;
     char *endptr = NULL;
@@ -198,6 +220,7 @@ static int safe_parse_double(const char *text, double *out) {
     return 1;
 }
 
+// 检查两个样本是否在保留字段上完全相同，用于过滤重复行
 static int rows_are_duplicate(const Row *a, const Row *b) {
     if (a->years_of_experience != b->years_of_experience) return 0;
     if (a->annual_salary_usd != b->annual_salary_usd) return 0;
@@ -211,6 +234,7 @@ static int rows_are_duplicate(const Row *a, const Row *b) {
     return 1;
 }
 
+// 随机打乱索引数组，用于划分训练集和测试集
 static void shuffle_indices(int *indices, int n) {
     for (int i = n - 1; i > 0; --i) {
         int j = rand() % (i + 1);
@@ -220,6 +244,7 @@ static void shuffle_indices(int *indices, int n) {
     }
 }
 
+// 计算给定索引集合的均值和标准差，用于特征标准化
 static void compute_normalization(const double *values, const int *indices, int n, double *mean_out, double *std_out) {
     double sum = 0.0;
     for (int i = 0; i < n; ++i) {
@@ -238,6 +263,7 @@ static void compute_normalization(const double *values, const int *indices, int 
     *std_out = std;
 }
 
+// 构建特征矩阵 X：每一行对应一个样本，第一列是标准化后的 years_of_experience，后面依次是分类特征的 one-hot 编码。
 static void build_feature_matrix(double *X, const double *years, int n, double mean, double std,
                                  int exp_idx[], int exp_count,
                                  int edu_idx[], int edu_count,
@@ -268,11 +294,14 @@ static void build_feature_matrix(double *X, const double *years, int n, double m
     }
 }
 
+// 训练 Ridge 线性回归模型。
+// 使用批量梯度下降更新参数，并在权重上添加 L2 正则化，降低过拟合风险。
 static void ridge_train(const double *X, const double *y, int n, int dim, double *weights,
                         int epochs, double learning_rate, double lambda) {
     for (int j = 0; j <= dim; ++j) weights[j] = 0.0;
 
     for (int epoch = 1; epoch <= epochs; ++epoch) {
+        // 计算每个参数的梯度
         double bias_grad = 0.0;
         double *weight_grads = calloc(dim, sizeof(double));
         if (!weight_grads) {
@@ -295,8 +324,10 @@ static void ridge_train(const double *X, const double *y, int n, int dim, double
             }
         }
 
-        weights[0] -= learning_rate * bias_grad;
+// 更新偏置项（截距），不对其使用正则化
+            weights[0] -= learning_rate * bias_grad;
         for (int j = 0; j < dim; ++j) {
+            // 正则化梯度：L2 正则化项会让权重不至于变得太大
             double reg_grad = 2.0 * lambda * weights[j + 1] / n;
             weights[j + 1] -= learning_rate * (weight_grads[j] + reg_grad);
         }
@@ -308,6 +339,7 @@ static void ridge_train(const double *X, const double *y, int n, int dim, double
     }
 }
 
+// 使用模型权重对一条样本进行预测，返回预测的年薪值。
 static double predict_one(const double *xrow, int dim, const double *weights) {
     double pred = weights[0];
     for (int j = 0; j < dim; ++j) {
@@ -316,6 +348,7 @@ static double predict_one(const double *xrow, int dim, const double *weights) {
     return pred;
 }
 
+// 评估模型在选定样本上的表现，计算 MAE、RMSE 和 R²。
 static void evaluate_model(const double *X, const double *y, const int *indices, int n, int dim, const double *weights,
                            double *mae, double *rmse, double *r2) {
     double sum_abs = 0.0;
@@ -340,9 +373,11 @@ static void evaluate_model(const double *X, const double *y, const int *indices,
     }
     *mae = sum_abs / n;
     *rmse = sqrt(sum_sq / n);
+    // 计算 R²：1 - SSE/SST。R² 越接近 1，模型解释能力越强。
     *r2 = (total_variance > 1e-12) ? (1.0 - residual_sum / total_variance) : 0.0;
 }
 
+// 打印类别名称和对应的 one-hot 索引，方便用户按照编号选择类别。
 static void print_categories(const char *name, Category *cats, int count) {
     printf("%s categories (%d):\n", name, count);
     for (int i = 0; i < count; ++i) {
@@ -352,6 +387,7 @@ static void print_categories(const char *name, Category *cats, int count) {
     }
 }
 
+// 从用户输入中读取一个整数索引，并确保它在合法范围内。
 static int ask_for_index(const char *prompt, int max_index) {
     int index = -1;
     while (index < 0 || index > max_index) {
@@ -369,6 +405,7 @@ static int ask_for_index(const char *prompt, int max_index) {
     return index;
 }
 
+// 允许用户手动输入样本特征，并使用训练好的模型进行预测。
 static void predict_custom_example(const double *weights, int dim,
                                    Category *exp_cats, int exp_count,
                                    Category *edu_cats, int edu_count,
@@ -441,6 +478,7 @@ static void predict_custom_example(const double *weights, int dim,
 }
 
 int main(void) {
+    // 程序入口：读取 CSV、处理数据、训练模型、评估结果，并支持自定义输入预测。
     const char *filename = "ai_jobs_market_2025_2026.csv";
     FILE *file = fopen(filename, "r");
     if (!file) {
@@ -487,6 +525,7 @@ int main(void) {
     int dropped_invalid = 0;
     int dropped_duplicate = 0;
 
+    // 逐行读取 CSV 数据，保留需要的字段并过滤无效行
     while (fgets(line, sizeof(line), file)) {
         char *fields[MAX_FIELDS] = {0};
         int field_count = parse_csv_line(line, fields, MAX_FIELDS);
@@ -558,6 +597,7 @@ int main(void) {
     if (dropped_invalid > 0) printf("丢弃 %d 条无效数值样本。\n", dropped_invalid);
     if (dropped_duplicate > 0) printf("丢弃 %d 条重复样本。\n", dropped_duplicate);
 
+    // 统计每个分类特征中的类别出现次数，并为低频类别做归并准备
     Category exp_cats[MAX_CAT_VALUES] = {0};
     Category edu_cats[MAX_CAT_VALUES] = {0};
     Category job_cats[MAX_CAT_VALUES] = {0};
@@ -629,6 +669,7 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    // 随机打乱样本顺序，并分成训练集和测试集
     int indices[MAX_ROWS];
     for (int i = 0; i < raw_count; ++i) indices[i] = i;
     srand(123456);
@@ -640,6 +681,7 @@ int main(void) {
     for (int i = 0; i < test_size; ++i) test_idx[i] = indices[train_size + i];
 
     double year_mean = 0.0, year_std = 1.0;
+    // 先在训练集上计算标准化参数，用相同参数处理全部数据
     compute_normalization(years, train_idx, train_size, &year_mean, &year_std);
     build_feature_matrix(X, years, raw_count, year_mean, year_std,
                          exp_idx, exp_count,
@@ -672,9 +714,11 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    // 训练线性回归模型，并打印训练过程中的损失。
     printf("\n开始训练 Ridge 线性回归模型...\n");
     ridge_train(X_train, y_train, train_size, total_features, weights, 2000, 0.01, 0.1);
 
+    // 评估模型在训练集和测试集上的效果
     double train_mae, train_rmse, train_r2;
     evaluate_model(X, salary, train_idx, train_size, total_features, weights, &train_mae, &train_rmse, &train_r2);
     double test_mae, test_rmse, test_r2;
@@ -688,6 +732,7 @@ int main(void) {
         printf("w[%d] = %.4f\n", i, weights[i]);
     }
 
+    // 如果希望进行人工输入预测，则进入交互预测环节
     printf("\n如果你想输入自定义特征进行预测，请在提示中输入。\n");
     predict_custom_example(weights, total_features,
                            exp_cats, exp_count,
