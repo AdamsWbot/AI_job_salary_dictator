@@ -47,7 +47,7 @@ typedef struct {
 static char *strdup_c(const char *text) {
     if (!text) return NULL;
     size_t len = strlen(text);
-    char *copy = malloc(len + 1);
+    char *copy = (char*)malloc(len + 1);
     if (!copy) return NULL;
     memcpy(copy, text, len + 1);
     return copy;
@@ -360,7 +360,7 @@ static void ridge_train(const double *X, const double *y, int n, int dim, double
     for (int epoch = 1; epoch <= epochs; ++epoch) {
         // 计算每个参数的梯度
         double bias_grad = 0.0;
-        double *weight_grads = calloc(dim, sizeof(double));
+        double *weight_grads = (double*)calloc(dim, sizeof(double));
         if (!weight_grads) {
             fprintf(stderr, "内存分配失败\n");
             exit(EXIT_FAILURE);
@@ -506,7 +506,7 @@ static void predict_custom_example(const double *weights, int dim,
     print_categories("industry", industry_cats, industry_count);
     int industry_choice = ask_for_index("选择 industry", industry_count - 1);
 
-    double *xrow = calloc((size_t)dim, sizeof(double));
+    double *xrow = (double*)calloc((size_t)dim, sizeof(double));
     if (!xrow) return;
     xrow[0] = (years - year_mean) / year_std;
     int offset = 1;
@@ -746,7 +746,7 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    double *X = calloc((size_t)raw_count * total_features, sizeof(double));
+    double *X = (double*)calloc((size_t)raw_count * total_features, sizeof(double));
     if (!X) {
         fprintf(stderr, "内存分配失败。\n");
         return EXIT_FAILURE;
@@ -775,8 +775,8 @@ int main(void) {
                          industry_idx, industry_count,
                          total_features);
 
-    double *X_train = calloc((size_t)train_size * total_features, sizeof(double));
-    double *y_train = calloc((size_t)train_size, sizeof(double));
+    double *X_train = (double*)calloc((size_t)train_size * total_features, sizeof(double));
+    double *y_train = (double*)calloc((size_t)train_size, sizeof(double));
     if (!X_train || !y_train) {
         fprintf(stderr, "训练集内存分配失败。\n");
         free(X);
@@ -787,7 +787,7 @@ int main(void) {
         y_train[i] = salary[train_idx[i]];
     }
 
-    double *weights = calloc((size_t)total_features + 1, sizeof(double));
+    double *weights = (double*)calloc((size_t)total_features + 1, sizeof(double));
     if (!weights) {
         fprintf(stderr, "权重内存分配失败。\n");
         free(X);
