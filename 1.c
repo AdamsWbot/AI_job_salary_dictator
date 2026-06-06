@@ -5,6 +5,11 @@
 #include <stddef.h>
 #include <math.h>
 
+// Windows 下设置控制台为 UTF-8，避免中文乱码
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 // 最大文本行长度，用于读取 CSV 行
 #define MAX_LINE 8192
 // CSV 最多字段数，用于拆分行
@@ -33,7 +38,6 @@ typedef struct {
     char *experience_level;
     char *education_required;
     char *job_category;
-    char *remote_work;
     char *company_size;
     char *country;
     char *industry;
@@ -104,12 +108,24 @@ static int parse_csv_line(const char *line, char **fields, int max_fields) {
     return field;
 }
 
+// 便携的忽略大小写字符串比较（避免 strcasecmp 的平台兼容性问题）
+static int stricmp_portable(const char *a, const char *b) {
+    if (!a || !b) return (a == b) ? 0 : (a ? 1 : -1);
+    while (*a && *b) {
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        a++; b++;
+    }
+    return tolower((unsigned char)*a) - tolower((unsigned char)*b);
+}
+
 // 判断字符串是否为空值，例如空字符串、空格、NA、N/A、null
 static int is_missing_value(const char *s) {
     if (!s) return 1;
     while (*s && isspace((unsigned char)*s)) s++;
     if (*s == '\0') return 1;
-    if (strcasecmp(s, "NA") == 0 || strcasecmp(s, "N/A") == 0 || strcasecmp(s, "null") == 0) return 1;
+    if (stricmp_portable(s, "NA") == 0 || stricmp_portable(s, "N/A") == 0 || stricmp_portable(s, "null") == 0) return 1;
     return 0;
 }
 
@@ -143,6 +159,40 @@ static int find_other_index(Category *cats, int count) {
     }
     return -1;
 }
+
+// ── 类别排序：按语义从低到高排列 ──────────────────────────────────
+
+// 返回 experience_level 的排序权重（从低到高）
+static int exp_level_order(const char *value) {
+    if (strstr(value, "Entry"))     return 0;
+    if (strstr(value, "Mid"))       return 1;
+    if (strstr(value, "Senior"))    return 2;
+    if (strstr(value, "Lead"))      return 3;
+    return 99; // 未知值排到最后
+}
+
+// 返回 education_required 的排序权重（从低到高）
+static int education_order(const char *value) {
+    if (strstr(value, "Bootcamp") || strstr(value, "Self-taught")) return 0;
+    if (strstr(value, "Associate")) return 1;
+    if (strstr(value, "Bachelor"))  return 2;
+    if (strstr(value, "Master"))    return 3;
+    if (strstr(value, "PhD"))       return 4;
+    return 99;
+}
+
+// 通用类别排序比较函数：根据 compare_func 的返回值升序排列
+static int category_cmp(const void *a, const void *b, int (*order_func)(const char*)) {
+    const Category *ca = (const Category *)a;
+    const Category *cb = (const Category *)b;
+    int oa = order_func(ca->value);
+    int ob = order_func(cb->value);
+    if (oa != ob) return oa - ob;
+    return strcmp(ca->value, cb->value);
+}
+
+static int cmp_exp(const void *a, const void *b) { return category_cmp(a, b, exp_level_order); }
+static int cmp_edu(const void *a, const void *b) { return category_cmp(a, b, education_order); }
 
 // 根据类别频率决定是否保留类别，并为保留类别分配 one-hot 索引。
 // 低于 min_count 的类别会被标记为不保留，并在后续映射到 "Other"。
@@ -196,7 +246,6 @@ static void free_rows(Row *rows, int row_count) {
         free(rows[i].experience_level);
         free(rows[i].education_required);
         free(rows[i].job_category);
-        free(rows[i].remote_work);
         free(rows[i].company_size);
         free(rows[i].country);
         free(rows[i].industry);
@@ -227,7 +276,6 @@ static int rows_are_duplicate(const Row *a, const Row *b) {
     if (strcmp(a->experience_level, b->experience_level) != 0) return 0;
     if (strcmp(a->education_required, b->education_required) != 0) return 0;
     if (strcmp(a->job_category, b->job_category) != 0) return 0;
-    if (strcmp(a->remote_work, b->remote_work) != 0) return 0;
     if (strcmp(a->company_size, b->company_size) != 0) return 0;
     if (strcmp(a->country, b->country) != 0) return 0;
     if (strcmp(a->industry, b->industry) != 0) return 0;
@@ -268,11 +316,11 @@ static void build_feature_matrix(double *X, const double *years, int n, double m
                                  int exp_idx[], int exp_count,
                                  int edu_idx[], int edu_count,
                                  int job_idx[], int job_count,
-                                 int remote_idx[], int remote_count,
                                  int company_idx[], int company_count,
                                  int country_idx[], int country_count,
                                  int industry_idx[], int industry_count,
                                  int total_features) {
+    (void)industry_count; /* 最后一组类别数，无需偏移 */
     for (int i = 0; i < n; ++i) {
         double *row = X + ((ptrdiff_t)i * total_features);
         for (int j = 0; j < total_features; ++j) row[j] = 0.0;
@@ -284,8 +332,6 @@ static void build_feature_matrix(double *X, const double *years, int n, double m
         offset += edu_count;
         if (job_idx[i] >= 0) row[offset + job_idx[i]] = 1.0;
         offset += job_count;
-        if (remote_idx[i] >= 0) row[offset + remote_idx[i]] = 1.0;
-        offset += remote_count;
         if (company_idx[i] >= 0) row[offset + company_idx[i]] = 1.0;
         offset += company_count;
         if (country_idx[i] >= 0) row[offset + country_idx[i]] = 1.0;
@@ -324,8 +370,8 @@ static void ridge_train(const double *X, const double *y, int n, int dim, double
             }
         }
 
-// 更新偏置项（截距），不对其使用正则化
-            weights[0] -= learning_rate * bias_grad;
+        // 更新偏置项（截距），不对其使用正则化
+        weights[0] -= learning_rate * bias_grad;
         for (int j = 0; j < dim; ++j) {
             // 正则化梯度：L2 正则化项会让权重不至于变得太大
             double reg_grad = 2.0 * lambda * weights[j + 1] / n;
@@ -410,7 +456,6 @@ static void predict_custom_example(const double *weights, int dim,
                                    Category *exp_cats, int exp_count,
                                    Category *edu_cats, int edu_count,
                                    Category *job_cats, int job_count,
-                                   Category *remote_cats, int remote_count,
                                    Category *company_cats, int company_count,
                                    Category *country_cats, int country_count,
                                    Category *industry_cats, int industry_count,
@@ -439,10 +484,6 @@ static void predict_custom_example(const double *weights, int dim,
     int job_choice = ask_for_index("选择 job_category", job_count - 1);
 
     printf("\n");
-    print_categories("remote_work", remote_cats, remote_count);
-    int remote_choice = ask_for_index("选择 remote_work", remote_count - 1);
-
-    printf("\n");
     print_categories("company_size", company_cats, company_count);
     int company_choice = ask_for_index("选择 company_size", company_count - 1);
 
@@ -464,8 +505,6 @@ static void predict_custom_example(const double *weights, int dim,
     offset += edu_count;
     if (job_choice >= 0) xrow[offset + job_choice] = 1.0;
     offset += job_count;
-    if (remote_choice >= 0) xrow[offset + remote_choice] = 1.0;
-    offset += remote_count;
     if (company_choice >= 0) xrow[offset + company_choice] = 1.0;
     offset += company_count;
     if (country_choice >= 0) xrow[offset + country_choice] = 1.0;
@@ -479,6 +518,13 @@ static void predict_custom_example(const double *weights, int dim,
 
 int main(void) {
     // 程序入口：读取 CSV、处理数据、训练模型、评估结果，并支持自定义输入预测。
+
+    // Windows 控制台设置为 UTF-8 编码，避免中文乱码
+#ifdef _WIN32
+    SetConsoleOutputCP(65001);
+    SetConsoleCP(65001);
+#endif
+
     const char *filename = "ai_jobs_market_2025_2026.csv";
     FILE *file = fopen(filename, "r");
     if (!file) {
@@ -496,7 +542,7 @@ int main(void) {
     int header_fields = 0;
     char *header[MAX_FIELDS];
     header_fields = parse_csv_line(line, header, MAX_FIELDS);
-    int idx_years = -1, idx_exp_level = -1, idx_edu = -1, idx_job_cat = -1, idx_remote = -1;
+    int idx_years = -1, idx_exp_level = -1, idx_edu = -1, idx_job_cat = -1;
     int idx_company = -1, idx_country = -1, idx_industry = -1, idx_salary = -1;
 
     for (int i = 0; i < header_fields; ++i) {
@@ -504,7 +550,6 @@ int main(void) {
         if (strcmp(header[i], "experience_level") == 0) idx_exp_level = i;
         if (strcmp(header[i], "education_required") == 0) idx_edu = i;
         if (strcmp(header[i], "job_category") == 0) idx_job_cat = i;
-        if (strcmp(header[i], "remote_work") == 0) idx_remote = i;
         if (strcmp(header[i], "company_size") == 0) idx_company = i;
         if (strcmp(header[i], "country") == 0) idx_country = i;
         if (strcmp(header[i], "industry") == 0) idx_industry = i;
@@ -513,7 +558,7 @@ int main(void) {
 
     for (int i = 0; i < header_fields; ++i) free(header[i]);
 
-    if (idx_years < 0 || idx_exp_level < 0 || idx_edu < 0 || idx_job_cat < 0 || idx_remote < 0 || idx_company < 0 || idx_country < 0 || idx_industry < 0 || idx_salary < 0) {
+    if (idx_years < 0 || idx_exp_level < 0 || idx_edu < 0 || idx_job_cat < 0 || idx_company < 0 || idx_country < 0 || idx_industry < 0 || idx_salary < 0) {
         fprintf(stderr, "CSV 缺少必要字段。\n");
         fclose(file);
         return EXIT_FAILURE;
@@ -533,7 +578,7 @@ int main(void) {
             for (int j = 0; j < field_count; ++j) free(fields[j]);
             continue;
         }
-        if (is_missing_value(fields[idx_years]) || is_missing_value(fields[idx_exp_level]) || is_missing_value(fields[idx_edu]) || is_missing_value(fields[idx_job_cat]) || is_missing_value(fields[idx_remote]) || is_missing_value(fields[idx_company]) || is_missing_value(fields[idx_country]) || is_missing_value(fields[idx_industry]) || is_missing_value(fields[idx_salary])) {
+        if (is_missing_value(fields[idx_years]) || is_missing_value(fields[idx_exp_level]) || is_missing_value(fields[idx_edu]) || is_missing_value(fields[idx_job_cat]) || is_missing_value(fields[idx_company]) || is_missing_value(fields[idx_country]) || is_missing_value(fields[idx_industry]) || is_missing_value(fields[idx_salary])) {
             dropped_empty++;
             for (int j = 0; j < field_count; ++j) free(fields[j]);
             continue;
@@ -557,7 +602,6 @@ int main(void) {
         candidate.experience_level = strdup_c(fields[idx_exp_level]);
         candidate.education_required = strdup_c(fields[idx_edu]);
         candidate.job_category = strdup_c(fields[idx_job_cat]);
-        candidate.remote_work = strdup_c(fields[idx_remote]);
         candidate.company_size = strdup_c(fields[idx_company]);
         candidate.country = strdup_c(fields[idx_country]);
         candidate.industry = strdup_c(fields[idx_industry]);
@@ -574,7 +618,6 @@ int main(void) {
             free(candidate.experience_level);
             free(candidate.education_required);
             free(candidate.job_category);
-            free(candidate.remote_work);
             free(candidate.company_size);
             free(candidate.country);
             free(candidate.industry);
@@ -601,26 +644,27 @@ int main(void) {
     Category exp_cats[MAX_CAT_VALUES] = {0};
     Category edu_cats[MAX_CAT_VALUES] = {0};
     Category job_cats[MAX_CAT_VALUES] = {0};
-    Category remote_cats[MAX_CAT_VALUES] = {0};
     Category company_cats[MAX_CAT_VALUES] = {0};
     Category country_cats[MAX_CAT_VALUES] = {0};
     Category industry_cats[MAX_CAT_VALUES] = {0};
-    int exp_count = 0, edu_count = 0, job_count = 0, remote_count = 0, company_count = 0, country_count = 0, industry_count = 0;
+    int exp_count = 0, edu_count = 0, job_count = 0, company_count = 0, country_count = 0, industry_count = 0;
 
     for (int i = 0; i < raw_count; ++i) {
         category_add(exp_cats, &exp_count, rows[i].experience_level);
         category_add(edu_cats, &edu_count, rows[i].education_required);
         category_add(job_cats, &job_count, rows[i].job_category);
-        category_add(remote_cats, &remote_count, rows[i].remote_work);
         category_add(company_cats, &company_count, rows[i].company_size);
         category_add(country_cats, &country_count, rows[i].country);
         category_add(industry_cats, &industry_count, rows[i].industry);
     }
 
+    // 对经验等级和学历按从低到高排序，使 one-hot 索引符合语义顺序
+    if (exp_count > 1) qsort(exp_cats, (size_t)exp_count, sizeof(Category), cmp_exp);
+    if (edu_count > 1) qsort(edu_cats, (size_t)edu_count, sizeof(Category), cmp_edu);
+
     build_category_mapping(exp_cats, &exp_count, RARE_CATEGORY_THRESHOLD);
     build_category_mapping(edu_cats, &edu_count, RARE_CATEGORY_THRESHOLD);
     build_category_mapping(job_cats, &job_count, RARE_CATEGORY_THRESHOLD);
-    build_category_mapping(remote_cats, &remote_count, RARE_CATEGORY_THRESHOLD);
     build_category_mapping(company_cats, &company_count, RARE_CATEGORY_THRESHOLD);
     build_category_mapping(country_cats, &country_count, RARE_CATEGORY_THRESHOLD);
     build_category_mapping(industry_cats, &industry_count, RARE_CATEGORY_THRESHOLD);
@@ -629,19 +673,17 @@ int main(void) {
     print_categories("experience_level", exp_cats, exp_count);
     print_categories("education_required", edu_cats, edu_count);
     print_categories("job_category", job_cats, job_count);
-    print_categories("remote_work", remote_cats, remote_count);
     print_categories("company_size", company_cats, company_count);
     print_categories("country", country_cats, country_count);
     print_categories("industry", industry_cats, industry_count);
 
-    int exp_idx[MAX_ROWS], edu_idx[MAX_ROWS], job_idx[MAX_ROWS], remote_idx[MAX_ROWS], company_idx[MAX_ROWS], country_idx[MAX_ROWS], industry_idx[MAX_ROWS];
+    int exp_idx[MAX_ROWS], edu_idx[MAX_ROWS], job_idx[MAX_ROWS], company_idx[MAX_ROWS], country_idx[MAX_ROWS], industry_idx[MAX_ROWS];
     double years[MAX_ROWS];
     double salary[MAX_ROWS];
     for (int i = 0; i < raw_count; ++i) {
         exp_idx[i] = map_category_value(exp_cats, exp_count, rows[i].experience_level);
         edu_idx[i] = map_category_value(edu_cats, edu_count, rows[i].education_required);
         job_idx[i] = map_category_value(job_cats, job_count, rows[i].job_category);
-        remote_idx[i] = map_category_value(remote_cats, remote_count, rows[i].remote_work);
         company_idx[i] = map_category_value(company_cats, company_count, rows[i].company_size);
         country_idx[i] = map_category_value(country_cats, country_count, rows[i].country);
         industry_idx[i] = map_category_value(industry_cats, industry_count, rows[i].industry);
@@ -649,14 +691,13 @@ int main(void) {
         salary[i] = rows[i].annual_salary_usd;
     }
 
-    int total_features = 1 + exp_count + edu_count + job_count + remote_count + company_count + country_count + industry_count;
+    int total_features = 1 + exp_count + edu_count + job_count + company_count + country_count + industry_count;
     if (total_features > MAX_FEATURES) {
         fprintf(stderr, "特征维度过大：%d > %d。请减少类别数或增加 MAX_FEATURES。\n", total_features, MAX_FEATURES);
         free_rows(rows, raw_count);
         free_categories(exp_cats, exp_count);
         free_categories(edu_cats, edu_count);
         free_categories(job_cats, job_count);
-        free_categories(remote_cats, remote_count);
         free_categories(company_cats, company_count);
         free_categories(country_cats, country_count);
         free_categories(industry_cats, industry_count);
@@ -687,7 +728,6 @@ int main(void) {
                          exp_idx, exp_count,
                          edu_idx, edu_count,
                          job_idx, job_count,
-                         remote_idx, remote_count,
                          company_idx, company_count,
                          country_idx, country_count,
                          industry_idx, industry_count,
@@ -738,7 +778,6 @@ int main(void) {
                            exp_cats, exp_count,
                            edu_cats, edu_count,
                            job_cats, job_count,
-                           remote_cats, remote_count,
                            company_cats, company_count,
                            country_cats, country_count,
                            industry_cats, industry_count,
@@ -752,7 +791,6 @@ int main(void) {
     free_categories(exp_cats, exp_count);
     free_categories(edu_cats, edu_count);
     free_categories(job_cats, job_count);
-    free_categories(remote_cats, remote_count);
     free_categories(company_cats, company_count);
     free_categories(country_cats, country_count);
     free_categories(industry_cats, industry_count);
