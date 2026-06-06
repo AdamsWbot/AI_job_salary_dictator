@@ -194,6 +194,17 @@ static int category_cmp(const void *a, const void *b, int (*order_func)(const ch
 static int cmp_exp(const void *a, const void *b) { return category_cmp(a, b, exp_level_order); }
 static int cmp_edu(const void *a, const void *b) { return category_cmp(a, b, education_order); }
 
+// 返回 company_size 的排序权重（从小到大）
+static int company_size_order(const char *value) {
+    if (strstr(value, "(1-50)"))     return 0;   // Startup (1-50)
+    if (strstr(value, "(51-500)"))   return 1;   // SME (51-500)
+    if (strstr(value, "(501-5000)")) return 2;   // Mid-size (501-5000)
+    if (strstr(value, "(5000+)"))    return 3;   // Enterprise (5000+)
+    if (strstr(value, "FAANG"))      return 4;   // Big Tech (FAANG+)
+    return 99;
+}
+static int cmp_company(const void *a, const void *b) { return category_cmp(a, b, company_size_order); }
+
 // 根据类别频率决定是否保留类别，并为保留类别分配 one-hot 索引。
 // 低于 min_count 的类别会被标记为不保留，并在后续映射到 "Other"。
 static void build_category_mapping(Category *cats, int *count, int min_count) {
@@ -525,10 +536,40 @@ int main(void) {
     SetConsoleCP(65001);
 #endif
 
-    const char *filename = "ai_jobs_market_2025_2026.csv";
-    FILE *file = fopen(filename, "r");
+    const char *csv_name = "ai_jobs_market_2025_2026.csv";
+    FILE *file = NULL;
+
+    // 多级回退查找 CSV：当前目录 → exe 目录 → 上级目录 → 上上级目录
+    // 这样无论 exe 在项目根目录还是 output/ 子目录都能找到 CSV
+#ifdef _WIN32
+    char exe_dir[1024];
+    GetModuleFileNameA(NULL, exe_dir, sizeof(exe_dir));
+    char *last_sep = strrchr(exe_dir, '\\');
+    if (last_sep) *(last_sep + 1) = '\0';
+
+    // levels: 0=exe目录, 1=上级, 2=上上级
+    file = fopen(csv_name, "r");                          // 步骤1: CWD
+    for (int level = 0; !file && level <= 2; ++level) {
+        char path_buf[1024];
+        strncpy(path_buf, exe_dir, sizeof(path_buf) - 1);
+        path_buf[sizeof(path_buf) - 1] = '\0';
+        for (int up = 0; up < level; ++up) {
+            // 去掉末尾的 \，找到上一级
+            size_t len = strlen(path_buf);
+            if (len > 1 && path_buf[len - 1] == '\\') path_buf[len - 1] = '\0';
+            char *sep = strrchr(path_buf, '\\');
+            if (sep) *(sep + 1) = '\0';
+        }
+        snprintf(path_buf + strlen(path_buf),
+                 sizeof(path_buf) - strlen(path_buf), "%s", csv_name);
+        file = fopen(path_buf, "r");
+    }
+#else
+    file = fopen(csv_name, "r");
+#endif
     if (!file) {
-        fprintf(stderr, "无法打开文件：%s\n", filename);
+        fprintf(stderr, "无法打开文件：%s\n", csv_name);
+        fprintf(stderr, "请确认 CSV 文件在项目根目录下。\n");
         return EXIT_FAILURE;
     }
 
@@ -659,8 +700,9 @@ int main(void) {
     }
 
     // 对经验等级和学历按从低到高排序，使 one-hot 索引符合语义顺序
-    if (exp_count > 1) qsort(exp_cats, (size_t)exp_count, sizeof(Category), cmp_exp);
-    if (edu_count > 1) qsort(edu_cats, (size_t)edu_count, sizeof(Category), cmp_edu);
+    if (exp_count > 1)     qsort(exp_cats,     (size_t)exp_count,     sizeof(Category), cmp_exp);
+    if (edu_count > 1)     qsort(edu_cats,     (size_t)edu_count,     sizeof(Category), cmp_edu);
+    if (company_count > 1) qsort(company_cats, (size_t)company_count, sizeof(Category), cmp_company);
 
     build_category_mapping(exp_cats, &exp_count, RARE_CATEGORY_THRESHOLD);
     build_category_mapping(edu_cats, &edu_count, RARE_CATEGORY_THRESHOLD);

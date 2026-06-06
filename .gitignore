@@ -1,6 +1,6 @@
 .env
 *.key
-
+/output
 
 # 编译产物
 *.o
