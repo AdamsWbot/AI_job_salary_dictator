@@ -43,6 +43,17 @@ typedef struct {
     char *industry;
 } Row;
 
+// 模型评估指标集合，包含回归问题常用的所有指标
+typedef struct {
+    double mae;            // 平均绝对误差（美元）
+    double rmse;           // 均方根误差（美元），对大误差敏感
+    double r2;             // 决定系数 R²，越接近 1 越好
+    double adjusted_r2;    // 调整 R²，惩罚无用特征数量
+    double mape;           // 平均绝对百分比误差（%），归一化指标
+    double residual_mean;  // 残差均值，应为 0，偏离说明系统性偏差
+    double residual_std;   // 残差标准差，反映预测误差离散度
+} EvalMetrics;
+
 // 复制字符串，类似于 strdup，但更兼容标准 C
 static char *strdup_c(const char *text) {
     if (!text) return NULL;
@@ -351,10 +362,14 @@ static void build_feature_matrix(double *X, const double *years, int n, double m
     }
 }
 
-// 训练 Ridge 线性回归模型。
-// 使用批量梯度下降更新参数，并在权重上添加 L2 正则化，降低过拟合风险。
+// 前向声明：使用模型权重对一条样本进行预测，返回预测的年薪值。
+static double predict_one(const double *xrow, int dim, const double *weights);
+
+// 训练 Ridge 线性回归模型（批量梯度下降 + L2 正则化）。
+// X_test/y_test 可选：非 NULL 时每个打印节点同步输出测试集 MSE，用于诊断过拟合。
 static void ridge_train(const double *X, const double *y, int n, int dim, double *weights,
-                        int epochs, double learning_rate, double lambda) {
+                        int epochs, double learning_rate, double lambda,
+                        const double *X_test, const double *y_test, int n_test) {
     for (int j = 0; j <= dim; ++j) weights[j] = 0.0;
 
     for (int epoch = 1; epoch <= epochs; ++epoch) {
@@ -390,7 +405,19 @@ static void ridge_train(const double *X, const double *y, int n, int dim, double
         }
 
         if (epoch % 200 == 0 || epoch == 1 || epoch == epochs) {
-            printf("Epoch %d/%d: MSE=%.2f\n", epoch, epochs, mse / n);
+            printf("Epoch %4d/%-4d: train MSE=%12.2f", epoch, epochs, mse / n);
+            if (X_test && y_test && n_test > 0) {
+                double test_mse = 0.0;
+                for (int i = 0; i < n_test; ++i) {
+                    const double *xrow = X_test + ((ptrdiff_t)i * dim);
+                    double pred = predict_one(xrow, dim, weights);
+                    double err = pred - y_test[i];
+                    test_mse += err * err;
+                }
+                test_mse /= n_test;
+                printf(", test MSE=%12.2f", test_mse);
+            }
+            printf("\n");
         }
         free(weight_grads);
     }
@@ -405,11 +432,17 @@ static double predict_one(const double *xrow, int dim, const double *weights) {
     return pred;
 }
 
-// 评估模型在选定样本上的表现，计算 MAE、RMSE 和 R²。
-static void evaluate_model(const double *X, const double *y, const int *indices, int n, int dim, const double *weights,
-                           double *mae, double *rmse, double *r2) {
-    double sum_abs = 0.0;
-    double sum_sq = 0.0;
+// 评估模型在选定样本上的表现，返回包含 7 项指标的 EvalMetrics 结构体。
+// 指标包括：MAE、RMSE、R²、Adjusted R²、MAPE、残差均值、残差标准差。
+static EvalMetrics evaluate_model(const double *X, const double *y, const int *indices, int n, int dim, const double *weights) {
+    EvalMetrics m = {0};
+    if (n == 0) return m;
+
+    // 分配临时数组保存残差，避免重复遍历
+    double *errors = (double*)malloc((size_t)n * sizeof(double));
+    if (!errors) return m;
+
+    // 第一遍：计算目标均值与总方差（SST）
     double sum_target = 0.0;
     for (int i = 0; i < n; ++i) sum_target += y[indices[i]];
     double mean_target = sum_target / n;
@@ -418,20 +451,227 @@ static void evaluate_model(const double *X, const double *y, const int *indices,
         double diff = y[indices[i]] - mean_target;
         total_variance += diff * diff;
     }
-    double residual_sum = 0.0;
 
+    // 第二遍：逐样本预测，收集误差
+    double sum_abs = 0.0, sum_sq = 0.0, sum_ape = 0.0, sum_residual = 0.0;
     for (int i = 0; i < n; ++i) {
         const double *xrow = X + ((ptrdiff_t)indices[i] * dim);
         double prediction = predict_one(xrow, dim, weights);
         double error = prediction - y[indices[i]];
-        sum_abs += fabs(error);
-        sum_sq += error * error;
-        residual_sum += error * error;
+        errors[i] = error;
+        double abs_err = fabs(error);
+        sum_abs      += abs_err;
+        sum_sq       += error * error;
+        sum_residual += error;
+        // MAPE：跳过目标值过小（接近 0）的样本，避免除零放大误差
+        if (y[indices[i]] > 1.0) {
+            sum_ape += abs_err / y[indices[i]];
+        }
     }
-    *mae = sum_abs / n;
-    *rmse = sqrt(sum_sq / n);
-    // 计算 R²：1 - SSE/SST。R² 越接近 1，模型解释能力越强。
-    *r2 = (total_variance > 1e-12) ? (1.0 - residual_sum / total_variance) : 0.0;
+
+    m.mae  = sum_abs / n;
+    m.rmse = sqrt(sum_sq / n);
+    // R² = 1 - SSE/SST，越接近 1 解释能力越强
+    m.r2   = (total_variance > 1e-12) ? (1.0 - sum_sq / total_variance) : 0.0;
+
+    // Adjusted R² = 1 - [(1-R²)(n-1)/(n-p-1)]，惩罚冗余特征
+    int p = dim;
+    if (n > p + 1) {
+        m.adjusted_r2 = 1.0 - (1.0 - m.r2) * (double)(n - 1) / (double)(n - p - 1);
+    } else {
+        m.adjusted_r2 = m.r2;
+    }
+
+    m.mape = (sum_ape / n) * 100.0;
+
+    // 残差均值：理想情况下 ≈ 0
+    m.residual_mean = sum_residual / n;
+
+    // 残差标准差：衡量预测误差的离散程度
+    double res_var = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double diff = errors[i] - m.residual_mean;
+        res_var += diff * diff;
+    }
+    m.residual_std = sqrt(res_var / n);
+
+    free(errors);
+    return m;
+}
+
+// 将权重索引映射为人类可读的特征名称，用于特征重要性展示。
+// 索引 0 = bias，索引 1 = years_of_experience，后续按 one-hot 分组排列。
+static void print_feature_name(int idx,
+                               int exp_count, Category *exp_cats,
+                               int edu_count, Category *edu_cats,
+                               int job_count, Category *job_cats,
+                               int company_count, Category *company_cats,
+                               int country_count, Category *country_cats,
+                               int industry_count, Category *industry_cats) {
+    if (idx == 0) { printf("(bias/截距)"); return; }
+    idx -= 1; // 跳过 bias
+
+    if (idx == 0) { printf("years_of_experience"); return; }
+    idx -= 1; // 跳过数值特征
+
+    if (idx < exp_count)      { printf("experience_level=%s",    exp_cats[idx].value);      return; }
+    idx -= exp_count;
+    if (idx < edu_count)      { printf("education_required=%s",  edu_cats[idx].value);      return; }
+    idx -= edu_count;
+    if (idx < job_count)      { printf("job_category=%s",        job_cats[idx].value);      return; }
+    idx -= job_count;
+    if (idx < company_count)  { printf("company_size=%s",        company_cats[idx].value);  return; }
+    idx -= company_count;
+    if (idx < country_count)  { printf("country=%s",             country_cats[idx].value);  return; }
+    idx -= country_count;
+    if (idx < industry_count) { printf("industry=%s",            industry_cats[idx].value); return; }
+
+    printf("feature[%d]", idx);
+}
+
+// 打印特征重要性排名（按权重绝对值降序，Top N）。
+static void print_feature_importance(const double *weights, int dim,
+                                     int exp_count, Category *exp_cats,
+                                     int edu_count, Category *edu_cats,
+                                     int job_count, Category *job_cats,
+                                     int company_count, Category *company_cats,
+                                     int country_count, Category *country_cats,
+                                     int industry_count, Category *industry_cats,
+                                     int top_n) {
+    if (top_n <= 0 || dim <= 0) return;
+
+    // 创建 (index, |weight|) 配对并按绝对值降序排列
+    typedef struct { int idx; double abs_w; } Pair;
+    Pair *pairs = (Pair*)malloc((size_t)(dim + 1) * sizeof(Pair));
+    if (!pairs) return;
+    for (int i = 0; i <= dim; ++i) {
+        pairs[i].idx = i;
+        pairs[i].abs_w = fabs(weights[i]);
+    }
+    // 选择排序取 top_n（dim ≈ 55，数据量很小无需快排）
+    for (int i = 0; i <= dim && i < top_n; ++i) {
+        int best = i;
+        for (int j = i + 1; j <= dim; ++j) {
+            if (pairs[j].abs_w > pairs[best].abs_w) best = j;
+        }
+        if (best != i) { Pair t = pairs[i]; pairs[i] = pairs[best]; pairs[best] = t; }
+    }
+
+    printf("\n══════════════════════════════════════════════════════════\n");
+    printf("  特征重要性（权重绝对值 Top %d）\n", top_n);
+    printf("══════════════════════════════════════════════════════════\n");
+    printf("  %-3s %-42s %12s\n", "排名", "特征名称", "权重");
+    printf("──────────────────────────────────────────────────────────\n");
+    for (int i = 0; i < top_n && i <= dim; ++i) {
+        printf("  %-3d ", i + 1);
+        print_feature_name(pairs[i].idx,
+                          exp_count, exp_cats, edu_count, edu_cats,
+                          job_count, job_cats, company_count, company_cats,
+                          country_count, country_cats, industry_count, industry_cats);
+        printf(" %+12.2f\n", weights[pairs[i].idx]);
+    }
+    printf("──────────────────────────────────────────────────────────\n");
+    free(pairs);
+}
+
+// k-Fold 交叉验证：将数据分为 k 折，每折轮流作为验证集，其余作为训练集。
+// 输出每一折的指标及 k 折均值±标准差，提供比单次划分更稳定的评估。
+static void cross_validate(const double *X, const double *y,
+                           const int *all_indices, int n, int dim,
+                           int epochs, double lr, double lambda, int k) {
+    if (k < 2 || n < k * 2) {
+        printf("\n⚠ 样本数不足，跳过交叉验证（需要至少 %d 条）。\n", k * 2);
+        return;
+    }
+
+    printf("\n══════════════════════════════════════════════════════════\n");
+    printf("  %d-Fold 交叉验证\n", k);
+    printf("══════════════════════════════════════════════════════════\n");
+
+    // 复制并打乱索引顺序
+    int *fold_idx = (int*)malloc((size_t)n * sizeof(int));
+    double *cv_mae = (double*)malloc((size_t)k * sizeof(double));
+    double *cv_rmse = (double*)malloc((size_t)k * sizeof(double));
+    double *cv_r2  = (double*)malloc((size_t)k * sizeof(double));
+    if (!fold_idx || !cv_mae || !cv_rmse || !cv_r2) {
+        free(fold_idx); free(cv_mae); free(cv_rmse); free(cv_r2);
+        fprintf(stderr, "交叉验证内存分配失败。\n");
+        return;
+    }
+    for (int i = 0; i < n; ++i) fold_idx[i] = all_indices[i];
+    srand(789012);
+    for (int i = n - 1; i > 0; --i) {
+        int j = rand() % (i + 1);
+        int t = fold_idx[i]; fold_idx[i] = fold_idx[j]; fold_idx[j] = t;
+    }
+
+    int fold_size = n / k;
+
+    for (int fold = 0; fold < k; ++fold) {
+        int val_start = fold * fold_size;
+        int val_end   = (fold == k - 1) ? n : val_start + fold_size;
+        int val_size  = val_end - val_start;
+        int sub_n     = n - val_size;
+
+        // 构建子训练集
+        double *X_sub = (double*)malloc((size_t)sub_n * dim * sizeof(double));
+        double *y_sub = (double*)malloc((size_t)sub_n * sizeof(double));
+        double *w_cv  = (double*)calloc((size_t)dim + 1, sizeof(double));
+        if (!X_sub || !y_sub || !w_cv) {
+            free(X_sub); free(y_sub); free(w_cv);
+            cv_mae[fold] = cv_rmse[fold] = cv_r2[fold] = 0.0;
+            continue;
+        }
+
+        int pos = 0;
+        for (int f = 0; f < k; ++f) {
+            if (f == fold) continue; // 跳过当前验证折
+            int s = f * fold_size;
+            int e = (f == k - 1) ? n : s + fold_size;
+            for (int j = s; j < e; ++j) {
+                memcpy(X_sub + ((ptrdiff_t)pos * dim),
+                       X + ((ptrdiff_t)fold_idx[j] * dim),
+                       sizeof(double) * dim);
+                y_sub[pos] = y[fold_idx[j]];
+                ++pos;
+            }
+        }
+
+        ridge_train(X_sub, y_sub, sub_n, dim, w_cv, epochs, lr, lambda, NULL, NULL, 0);
+
+        EvalMetrics em = evaluate_model(X, y, fold_idx + val_start, val_size, dim, w_cv);
+        cv_mae[fold]  = em.mae;
+        cv_rmse[fold] = em.rmse;
+        cv_r2[fold]   = em.r2;
+
+        printf("  Fold %d/%d: MAE=%10.2f  RMSE=%10.2f  R²=%7.4f\n",
+               fold + 1, k, em.mae, em.rmse, em.r2);
+
+        free(X_sub); free(y_sub); free(w_cv);
+    }
+
+    // 计算各指标的均值和标准差
+    double mae_m = 0, rmse_m = 0, r2_m = 0;
+    for (int i = 0; i < k; ++i) { mae_m += cv_mae[i]; rmse_m += cv_rmse[i]; r2_m += cv_r2[i]; }
+    mae_m /= k; rmse_m /= k; r2_m /= k;
+    double mae_s = 0, rmse_s = 0, r2_s = 0;
+    for (int i = 0; i < k; ++i) {
+        mae_s  += (cv_mae[i]  - mae_m)  * (cv_mae[i]  - mae_m);
+        rmse_s += (cv_rmse[i] - rmse_m) * (cv_rmse[i] - rmse_m);
+        r2_s   += (cv_r2[i]   - r2_m)   * (cv_r2[i]   - r2_m);
+    }
+    mae_s  = sqrt(mae_s  / k);
+    rmse_s = sqrt(rmse_s / k);
+    r2_s   = sqrt(r2_s   / k);
+
+    printf("  ─────────────────────────────────────────────────────\n");
+    printf("  %-8s %16s %14s\n", "指标", "Mean", "Std");
+    printf("  %-8s %16.2f %14.2f\n", "MAE",   mae_m,  mae_s);
+    printf("  %-8s %16.2f %14.2f\n", "RMSE",  rmse_m, rmse_s);
+    printf("  %-8s %16.4f %14.4f\n", "R²",    r2_m,   r2_s);
+    printf("══════════════════════════════════════════════════════════\n");
+
+    free(fold_idx); free(cv_mae); free(cv_rmse); free(cv_r2);
 }
 
 // 打印类别名称和对应的 one-hot 索引，方便用户按照编号选择类别。
@@ -449,6 +689,7 @@ static int ask_for_index(const char *prompt, int max_index) {
     int index = -1;
     while (index < 0 || index > max_index) {
         printf("%s (0-%d): ", prompt, max_index);
+        fflush(stdout);
         if (scanf("%d", &index) != 1) {
             while (getchar() != '\n');
             printf("输入无效，请输入整数。\n");
@@ -473,9 +714,11 @@ static void predict_custom_example(const double *weights, int dim,
                                    double year_mean, double year_std) {
     printf("\n===== 人工输入预测示例 =====\n");
     printf("请根据提示输入特征值来预测 annual_salary_usd。\n");
+    printf("Input the feature values according to the prompts to predict annual_salary_usd.\n");
 
     double years;
     printf("years_of_experience: ");
+    fflush(stdout);  // 在线环境 stdout 可能是全缓冲，必须手动刷新
     if (scanf("%lf", &years) != 1) {
         printf("输入错误，跳过自定义预测。\n");
         while (getchar() != '\n');
@@ -524,10 +767,11 @@ static void predict_custom_example(const double *weights, int dim,
 
     double prediction = predict_one(xrow, dim, weights);
     printf("\n预测年薪 annual_salary_usd = %.2f USD\n", prediction);
+    fflush(stdout);
     free(xrow);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     // 程序入口：读取 CSV、处理数据、训练模型、评估结果，并支持自定义输入预测。
 
     // Windows 控制台设置为 UTF-8 编码，避免中文乱码
@@ -796,38 +1040,104 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    // 训练线性回归模型，并打印训练过程中的损失。
-    printf("\n开始训练 Ridge 线性回归模型...\n");
-    ridge_train(X_train, y_train, train_size, total_features, weights, 2000, 0.01, 0.1);
-
-    // 评估模型在训练集和测试集上的效果
-    double train_mae, train_rmse, train_r2;
-    evaluate_model(X, salary, train_idx, train_size, total_features, weights, &train_mae, &train_rmse, &train_r2);
-    double test_mae, test_rmse, test_r2;
-    evaluate_model(X, salary, test_idx, test_size, total_features, weights, &test_mae, &test_rmse, &test_r2);
-
-    printf("\n训练集评估: MAE=%.2f, RMSE=%.2f, R²=%.4f\n", train_mae, train_rmse, train_r2);
-    printf("测试集评估: MAE=%.2f, RMSE=%.2f, R²=%.4f\n", test_mae, test_rmse, test_r2);
-
-    printf("\n模型权重示例（前 10 个权重，包括偏置项）：\n");
-    for (int i = 0; i < total_features + 1 && i < 10; ++i) {
-        printf("w[%d] = %.4f\n", i, weights[i]);
+    // 构建测试集特征矩阵（用于学习曲线和评估）
+    double *X_test = (double*)calloc((size_t)test_size * total_features, sizeof(double));
+    double *y_test = (double*)calloc((size_t)test_size, sizeof(double));
+    if (!X_test || !y_test) {
+        fprintf(stderr, "测试集内存分配失败。\n");
+        free(X); free(X_train); free(y_train); free(weights);
+        free(X_test); free(y_test);
+        return EXIT_FAILURE;
+    }
+    for (int i = 0; i < test_size; ++i) {
+        memcpy(X_test + ((ptrdiff_t)i * total_features), X + ((ptrdiff_t)test_idx[i] * total_features), sizeof(double) * total_features);
+        y_test[i] = salary[test_idx[i]];
     }
 
-    // 如果希望进行人工输入预测，则进入交互预测环节
-    printf("\n如果你想输入自定义特征进行预测，请在提示中输入。\n");
-    predict_custom_example(weights, total_features,
-                           exp_cats, exp_count,
-                           edu_cats, edu_count,
-                           job_cats, job_count,
-                           company_cats, company_count,
-                           country_cats, country_count,
-                           industry_cats, industry_count,
-                           year_mean, year_std);
+    // 训练线性回归模型（同步输出训练集/测试集 MSE，诊断过拟合）
+    printf("\n开始训练 Ridge 线性回归模型...\n");
+    ridge_train(X_train, y_train, train_size, total_features, weights, 2000, 0.01, 0.1,
+                X_test, y_test, test_size);
+
+    // ── 单次 8:2 划分评估（7 项指标） ──
+    EvalMetrics train_em = evaluate_model(X, salary, train_idx, train_size, total_features, weights);
+    EvalMetrics test_em  = evaluate_model(X, salary, test_idx,  test_size,  total_features, weights);
+
+    printf("\n══════════════════════════════════════════════════════════\n");
+    printf("  模型评估（单次 8:2 随机划分）\n");
+    printf("══════════════════════════════════════════════════════════\n");
+    printf("  %-22s %14s %14s\n", "指标", "训练集", "测试集");
+    printf("  ──────────────────────────────────────────────────────\n");
+    printf("  %-22s %14.2f %14.2f\n", "MAE (美元)",          train_em.mae,          test_em.mae);
+    printf("  %-22s %14.2f %14.2f\n", "RMSE (美元)",         train_em.rmse,         test_em.rmse);
+    printf("  %-22s %14.4f %14.4f\n", "R²",                 train_em.r2,           test_em.r2);
+    printf("  %-22s %14.4f %14.4f\n", "Adjusted R²",        train_em.adjusted_r2,  test_em.adjusted_r2);
+    printf("  %-22s %13.2f%% %13.2f%%\n", "MAPE",          train_em.mape,         test_em.mape);
+    printf("  %-22s %14.2f %14.2f\n", "残差均值",           train_em.residual_mean, test_em.residual_mean);
+    printf("  %-22s %14.2f %14.2f\n", "残差标准差",         train_em.residual_std,  test_em.residual_std);
+    printf("══════════════════════════════════════════════════════════\n");
+
+    // ── 特征重要性 ──
+    print_feature_importance(weights, total_features,
+                             exp_count, exp_cats,
+                             edu_count, edu_cats,
+                             job_count, job_cats,
+                             company_count, company_cats,
+                             country_count, country_cats,
+                             industry_count, industry_cats, 15);
+
+    // ── 5-Fold 交叉验证 ──
+    cross_validate(X, salary, train_idx, train_size, total_features, 2000, 0.01, 0.1, 5);
+
+    // ── 命令行传参 → 非交互预测；无参数 → 交互模式 ──
+    if (argc == 8) {
+        // JupyterLab / 在线环境：一行命令直接预测
+        // 用法: ./1  years  exp  edu  job  company  country  industry
+        double years    = atof(argv[1]);
+        int exp_choice  = atoi(argv[2]);
+        int edu_choice  = atoi(argv[3]);
+        int job_choice  = atoi(argv[4]);
+        int comp_choice = atoi(argv[5]);
+        int ctry_choice = atoi(argv[6]);
+        int ind_choice  = atoi(argv[7]);
+
+        double *xrow = (double*)calloc((size_t)total_features, sizeof(double));
+        if (!xrow) return EXIT_FAILURE;
+        xrow[0] = (years - year_mean) / year_std;
+        int offset = 1;
+        xrow[offset + exp_choice]  = 1.0; offset += exp_count;
+        xrow[offset + edu_choice]  = 1.0; offset += edu_count;
+        xrow[offset + job_choice]  = 1.0; offset += job_count;
+        xrow[offset + comp_choice] = 1.0; offset += company_count;
+        xrow[offset + ctry_choice] = 1.0; offset += country_count;
+        xrow[offset + ind_choice]  = 1.0;
+
+        double pred = predict_one(xrow, total_features, weights);
+        printf("\n预测年薪 annual_salary_usd = %.2f USD\n", pred);
+        fflush(stdout);
+        free(xrow);
+
+    } else if (argc > 1) {
+        printf("用法: %s  years  exp_level  edu  job_category  company_size  country  industry\n", argv[0]);
+        printf("示例: %s  7  0  2  0  2  0  1\n", argv[0]);
+    } else {
+        // 终端环境：交互式逐项输入
+        printf("\n输入自定义特征进行预测...\n");
+        predict_custom_example(weights, total_features,
+                               exp_cats, exp_count,
+                               edu_cats, edu_count,
+                               job_cats, job_count,
+                               company_cats, company_count,
+                               country_cats, country_count,
+                               industry_cats, industry_count,
+                               year_mean, year_std);
+    }
 
     free(X);
     free(X_train);
     free(y_train);
+    free(X_test);
+    free(y_test);
     free(weights);
     free_rows(rows, raw_count);
     free_categories(exp_cats, exp_count);
