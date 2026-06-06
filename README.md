@@ -303,7 +303,6 @@ Adjusted R² 略低于 R²（因 53 个特征中有部分贡献较小）；MAPE 
 
 总计：1 个数值特征 + 52 个 one-hot 特征 = **53 维特征向量**。
 
-> **注意：** `remote_work`（办公模式）已从特征中移除，不作为训练输入。
 
 ## 未使用的字段（避免数据泄漏）
 
@@ -663,7 +662,6 @@ Or with command-line args:
 
 Total: 1 numeric feature + 52 one-hot features = **53-dimensional feature vector**.
 
-> **Note:** `remote_work` is intentionally excluded from training features.
 
 ## Excluded Fields (to avoid data leakage)
 
