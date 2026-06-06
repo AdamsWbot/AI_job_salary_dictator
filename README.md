@@ -353,7 +353,7 @@ A: 目前程序只支持逐条交互预测。如需批量预测，可以修改 `
 
 ---
 ---
----
+**English**
 
 # AI Salary Predictor — C Language Implementation
 
@@ -362,7 +362,6 @@ Ridge linear regression (L2 regularization) using 7 features to predict `annual_
 Data source: [Kaggle — AI Jobs Market 2025-2026 Salaries](https://www.kaggle.com/datasets/alitaqishah/ai-jobs-market-2025-2026-salaries)
 
 ---
-English
 
 ## Quick Start
 
