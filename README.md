@@ -1,4 +1,4 @@
-# AI 从业者年薪预测 — C 语言实现
+# AI 从业者年薪预测 — C++ 实现
 
 基于 Ridge 线性回归（L2 正则化），使用 7 个特征预测 AI 岗位的 `annual_salary_usd`。
 
@@ -10,13 +10,13 @@
 
 ### 1. 环境要求
 
-- **GCC**（MinGW / MSYS2 / WSL 均可）
-- 项目目录下同时存在 `1.c` 和 `ai_jobs_market_2025_2026.csv`
+- **G++**（MinGW / MSYS2 / WSL 均可），支持 C++11
+- 项目目录下同时存在 `1.cpp`、`rapidcsv.h` 和 `ai_jobs_market_2025_2026.csv`
 
 ### 2. 编译
 
 ```bash
-gcc -Wall -Wextra -std=c11 -o salary_predictor 1.c -lm
+g++ -Wall -Wextra -std=c++11 -o salary_predictor 1.cpp -lm
 ```
 
 ### 3. 运行
@@ -27,10 +27,10 @@ gcc -Wall -Wextra -std=c11 -o salary_predictor 1.c -lm
 ./salary_predictor
 ```
 
-**非交互模式**（管道传入 7 个特征值，跳过手动输入）：
+**非交互模式**（命令行传入 7 个特征值，适用于 JupyterLab 等无 stdin 环境）：
 
 ```bash
-echo "7 2 1 0 2 0 1" | ./salary_predictor
+./salary_predictor 7 0 2 0 2 0 1
 ```
 
 ---
@@ -324,6 +324,7 @@ Adjusted R² 略低于 R²（因 53 个特征中有部分贡献较小）；MAPE 
 | 训练/测试划分 | 8:2 | 随机打乱后划分 |
 | 随机种子 | 123456 | 可复现结果 |
 | 低频类别阈值 | 2 | 出现次数 <2 的类别合并为 "Other" |
+| CSV 解析库 | rapidcsv.h | header-only，无需安装 |
 
 ---
 
@@ -331,7 +332,8 @@ Adjusted R² 略低于 R²（因 53 个特征中有部分贡献较小）；MAPE 
 
 | 文件 | 用途 |
 |---|---|
-| `1.c` | 完整源码（CSV 读取 → 清洗 → 编码 → 训练 → 评估 → 预测） |
+| `1.cpp` | 完整源码（rapidcsv 读取 → 清洗 → 编码 → 训练 → 评估 → 预测） |
+| `rapidcsv.h` | header-only CSV 解析库（无需额外安装） |
 | `ai_jobs_market_2025_2026.csv` | 原始数据（1500 条 AI 岗位记录） |
 | `README.md` | 本说明文档 |
 
@@ -343,7 +345,7 @@ Adjusted R² 略低于 R²（因 53 个特征中有部分贡献较小）；MAPE 
 A: 确认 `ai_jobs_market_2025_2026.csv` 与可执行文件在同一目录下。
 
 **Q: 编译报错？**
-A: 确认 GCC 已安装（`gcc --version`），且命令行当前目录正确。
+A: 确认 G++ 已安装（`g++ --version`）且支持 C++11。确保 `rapidcsv.h` 与 `1.cpp` 在同一目录下。
 
 **Q: R² 不够高？**
 A: 线性模型只能捕捉线性关系。数据中存在非线性模式时，可以尝试多项式特征、决策树、神经网络等更复杂的模型。
@@ -355,7 +357,7 @@ A: 目前程序只支持逐条交互预测。如需批量预测，可以修改 `
 ---
 **English**
 
-# AI Salary Predictor — C Language Implementation
+# AI Salary Predictor — C++ Implementation
 
 Ridge linear regression (L2 regularization) using 7 features to predict `annual_salary_usd` for AI job positions.
 
@@ -367,19 +369,13 @@ Data source: [Kaggle — AI Jobs Market 2025-2026 Salaries](https://www.kaggle.c
 
 ### 1. Requirements
 
-- **GCC** (MinGW / MSYS2 / WSL all work)
-- Both `1.c` and `ai_jobs_market_2025_2026.csv` present in the project directory
+- **G++** (MinGW / MSYS2 / WSL all work), with C++11 support
+- `1.cpp`, `rapidcsv.h`, and `ai_jobs_market_2025_2026.csv` present in the project directory
 
 ### 2. Compilation
 
 ```bash
-gcc -Wall -Wextra -std=c11 -o salary_predictor 1.c -lm
-```
-
-Also compiles with `g++` for C++ environments:
-
-```bash
-g++ -Wall -Wextra -std=c++11 -o salary_predictor 1.c -lm
+g++ -Wall -Wextra -std=c++11 -o salary_predictor 1.cpp -lm
 ```
 
 ### 3. Running
@@ -390,7 +386,7 @@ g++ -Wall -Wextra -std=c++11 -o salary_predictor 1.c -lm
 ./salary_predictor
 ```
 
-**Non-interactive mode** (pass 7 feature values as command-line arguments):
+**Non-interactive mode** (pass 7 feature values as command-line arguments, for JupyterLab etc.):
 
 ```bash
 ./salary_predictor 7 0 2 0 2 0 1
@@ -680,6 +676,7 @@ Total: 1 numeric feature + 52 one-hot features = **53-dimensional feature vector
 | Train/Test Split | 80:20 | Shuffled before splitting |
 | Random Seed | 123456 | Reproducible results |
 | Rare Category Threshold | 2 | Categories with <2 occurrences merged as "Other" |
+| CSV Library | rapidcsv.h | Header-only, no installation needed |
 
 ---
 
@@ -687,7 +684,8 @@ Total: 1 numeric feature + 52 one-hot features = **53-dimensional feature vector
 
 | File | Purpose |
 |---|---|
-| `1.c` | Complete source code (CSV parse → clean → encode → train → evaluate → predict) |
+| `1.cpp` | Complete source code (rapidcsv read → clean → encode → train → evaluate → predict) |
+| `rapidcsv.h` | Header-only CSV parsing library (no installation needed) |
 | `ai_jobs_market_2025_2026.csv` | Raw dataset (1500 AI job records) |
 | `README.md` | This documentation (Chinese + English) |
 
@@ -699,7 +697,7 @@ Total: 1 numeric feature + 52 one-hot features = **53-dimensional feature vector
 A: Make sure `ai_jobs_market_2025_2026.csv` is in the same directory as the executable.
 
 **Q: Compilation errors?**
-A: Verify GCC is installed (`gcc --version`) and your working directory is correct.
+A: Verify G++ is installed (`g++ --version`) with C++11 support. Ensure `rapidcsv.h` is in the same directory as `1.cpp`.
 
 **Q: R² isn't high enough?**
 A: A linear model can only capture linear relationships. For non-linear patterns, try polynomial features, decision trees, gradient boosting, or neural networks.
@@ -708,7 +706,7 @@ A: A linear model can only capture linear relationships. For non-linear patterns
 A: Currently single-prediction only. To batch-predict, modify `main()` to loop over feature rows read from a file instead of calling `predict_custom_example`.
 
 **Q: Does this work in JupyterLab / online environments?**
-A: Yes. Use command-line argument mode: `!./salary_predictor 7 0 2 0 2 0 1` in a notebook cell. Interactive mode requires a real terminal with stdin.
+A: Yes. Compile with `!g++ -std=c++11 -o salary_predictor 1.cpp -lm` then predict with `!./salary_predictor 7 0 2 0 2 0 1` in notebook cells. Interactive mode requires a real terminal with stdin.
 
 **Q: What do the evaluation metrics mean in plain terms?**
 A: R²=0.72 → 72% of salary differences are explained by the 7 features. MAE=26k → average prediction is off by ±$26,000. MAPE=15% → relative error is ~15%. CV std is small → model is stable across different data splits. No overfitting.
